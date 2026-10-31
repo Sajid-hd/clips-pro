@@ -1,0 +1,8 @@
+{
+  "name": "clips-pro",
+  "productName": "Clips Pro",
+  "version": "1.0.0",
+  "description": "Clips Pro - video player and editor",
+  "main": "main.js",
+  "author": "Clips Pro"
+}

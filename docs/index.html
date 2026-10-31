@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; media-src 'self' file: blob:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; font-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Clips Pro</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#111214">
+<meta name="description" content="Clips Pro — video player and editor. Your videos never leave your PC.">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="assets/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header id="titlebar">
+    <div class="logo" aria-hidden="true"><span>C</span><b>P</b></div>
+    <nav id="menubar" aria-label="Main menu"></nav>
+    <div id="title-text">Clips Pro</div>
+  </header>
+
+  <div id="main">
+    <aside id="sources" hidden>
+      <div class="panel-head"><h2>Sources</h2><span id="src-count" class="muted"></span></div>
+      <div id="src-list" role="list"></div>
+      <div class="hint muted">Drag to reorder · right-click for actions · speaker picks the audio</div>
+      <div id="stack-opts" hidden>
+        <h3>Stack</h3>
+        <label class="row">Combine
+          <select id="combine">
+            <option value="over">Over</option>
+            <option value="replace">Replace</option>
+            <option value="add">Add</option>
+            <option value="difference">Difference</option>
+            <option value="invdiff">Inverted Difference</option>
+          </select>
+        </label>
+        <label class="row">Wipes <input type="checkbox" id="wipes-toggle"></label>
+        <div class="muted small">( and ) change which clip is on top.</div>
+      </div>
+    </aside>
+
+    <section id="viewer" tabindex="-1">
+      <div id="stage"></div>
+      <div id="wipe-line" hidden><div class="knob"></div></div>
+      <div id="overlay-info" class="mono"></div>
+      <div id="viewer-tools">
+        <button id="btn-fit" class="chip">Fit</button>
+        <button id="btn-sources" class="chip">Sources ▸</button>
+      </div>
+      <div id="image-info" hidden></div>
+      <div id="convert-card" hidden></div>
+      <div id="empty" class="empty">
+        <div class="empty-inner">
+          <div class="big-logo"><span>C</span><b>P</b></div>
+          <h1>Clips Pro</h1>
+          <p>Drop videos here, or</p>
+          <div class="row-btns"><button id="btn-open" class="primary">Open file…</button></div>
+          <p class="muted small">Drop several at once to play them in sequence, stack, side by side or as a grid.</p>
+        </div>
+      </div>
+      <div id="drop-hint" hidden><div>Drop to open</div></div>
+      <div id="toast" hidden></div>
+    </section>
+  </div>
+
+  <footer id="bottom">
+    <div id="readout-row">
+      <div class="seg" id="mode-seg" role="group" aria-label="View mode">
+        <button data-mode="sequence">Sequence</button><button data-mode="stack">Stack</button><button data-mode="layout">Layout</button><button data-mode="tile">Tile</button>
+      </div>
+      <div id="readouts" class="mono"></div>
+      <span class="muted">Zoom</span>
+      <input type="range" id="zoom" min="0" max="1000" value="0" aria-label="Timeline zoom">
+      <button id="btn-zoom-fit" class="chip">Fit</button>
+    </div>
+    <div id="timeline-wrap"><canvas id="timeline"></canvas></div>
+    <div id="trim-panel" hidden></div>
+    <div id="transport">
+      <div class="side left">
+        <button class="icon" id="btn-vol" aria-label="Mute"></button>
+        <input type="range" id="volume" min="0" max="100" value="100" aria-label="Volume">
+      </div>
+      <div class="center">
+        <button class="icon" id="btn-start" aria-label="Go to start"></button>
+        <button class="icon" id="btn-prev" aria-label="Previous frame"></button>
+        <button class="icon" id="btn-rev" aria-label="Play reverse"></button>
+        <button class="icon play" id="btn-play" aria-label="Play"></button>
+        <button class="icon" id="btn-next" aria-label="Next frame"></button>
+        <button class="icon" id="btn-end" aria-label="Go to end"></button>
+        <button class="icon" id="btn-loop" aria-label="Loop mode"></button>
+      </div>
+      <div class="side right">
+        <input id="frame-field" class="mono" aria-label="Go to frame" spellcheck="false">
+        <span id="frame-total" class="mono muted"></span>
+        <button id="btn-display" class="chip">Frames ▾</button>
+        <button id="btn-speed" class="chip">1×</button>
+        <button id="btn-allframes" class="chip toggle">All frames</button>
+        <button id="btn-scrub" class="chip toggle">Audio scrub</button>
+        <button id="btn-edit" class="edit" title="The full editor arrives in the next update">Edit</button>
+      </div>
+    </div>
+  </footer>
+</div>
+
+<div id="menu-layer"></div>
+<div id="modal-layer"></div>
+
+<script src="js/util.js"></script>
+<script src="js/keys.js"></script>
+<script src="js/menu.js"></script>
+<script src="js/media.js"></script>
+<script src="js/player.js"></script>
+<script src="js/timeline.js"></script>
+<script src="js/dialogs.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
