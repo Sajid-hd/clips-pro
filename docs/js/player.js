@@ -326,13 +326,20 @@ const Player = (() => {
     const r = ranges(); if (!r.length) return;
     const ref = S.inF != null ? S.inF : S.frame;
     let i = r.findIndex(([a, b]) => ref >= a && ref <= b); if (i < 0) i = 0;
+    S.selRange = null;
     const isSet = S.inF === r[i][0] && S.outF === r[i][1];
     const j = clamp(isSet ? i + d : (d > 0 ? i : i), 0, r.length - 1);
     S.inF = r[j][0]; S.outF = r[j][1]; goto(S.inF);
   }
-  function setIn(g = S.frame) { S.inF = g; if (S.outF != null && S.outF < g) S.outF = null; changed(); }
-  function setOut(g = S.frame) { S.outF = g; if (S.inF != null && S.inF > g) S.inF = null; changed(); }
-  function clearInOut() { S.inF = S.outF = null; changed(); }
+  // [ and ] make numbered ranges (see ranges.js)
+  function setIn(g = S.frame) { Ranges.markIn(g); changed(); }
+  function setOut(g = S.frame) { Ranges.markOut(g); changed(); }
+  function clearInOut() { S.selRange = null; S.inF = S.outF = null; changed(); }
+  function fitRanges() {
+    const T = total();
+    S.ranges = S.ranges.filter((r) => r.a < T).map((r) => { r.b = Math.min(r.b, T - 1); return r; });
+    if (S.selRange && !S.ranges.some((r) => r.id === S.selRange)) { S.selRange = null; S.inF = S.outF = null; }
+  }
 
   // ---------- view ----------
   function layout() {
@@ -408,7 +415,7 @@ const Player = (() => {
 
   // ---------- session ----------
   function snapshot() {
-    return { clips: S.clips.map((c) => ({ id: c.id, media: c.media, tin: c.tin, tout: c.tout, rot: c.rot, fh: c.fh, fv: c.fv, mute: c.mute, auto: c.auto })), marks: [...S.marks], inF: S.inF, outF: S.outF, stackOrder: S.stackOrder.slice(), audioClip: S.audioClip, frame: S.frame };
+    return { clips: S.clips.map((c) => ({ id: c.id, media: c.media, tin: c.tin, tout: c.tout, rot: c.rot, fh: c.fh, fv: c.fv, mute: c.mute, auto: c.auto })), marks: [...S.marks], inF: S.inF, outF: S.outF, ranges: S.ranges.map((r) => ({ ...r })), selRange: S.selRange, stackOrder: S.stackOrder.slice(), audioClip: S.audioClip, frame: S.frame };
   }
   function restore(s) {
     const keep = new Map(S.clips.map((c) => [c.id, c]));
@@ -420,7 +427,7 @@ const Player = (() => {
       next.push(c);
     }
     for (const c of keep.values()) { c.el.pause(); c.el.removeAttribute('src'); c.el.load(); c.el.remove(); }
-    S.clips = next; S.marks = new Set(s.marks); S.inF = s.inF; S.outF = s.outF; S.stackOrder = s.stackOrder.filter((id) => byId(id)); S.audioClip = s.audioClip;
+    S.clips = next; S.marks = new Set(s.marks); S.inF = s.inF; S.outF = s.outF; S.ranges = (s.ranges || []).map((r) => ({ ...r })); S.selRange = s.selRange || null; S.stackOrder = s.stackOrder.filter((id) => byId(id)); S.audioClip = s.audioClip;
     syncOrder(); layout(); showFrame(clamp(s.frame, 0, Math.max(0, total() - 1)));
   }
   function commit() { hist.undo.push(snapshot()); if (hist.undo.length > 200) hist.undo.shift(); hist.redo = []; }
@@ -460,7 +467,7 @@ const Player = (() => {
     if (S.playing) pause();
     for (const c of S.clips) { c.el.pause(); c.el.removeAttribute('src'); c.el.load(); c.el.remove(); }
     S.clips = []; S.stackOrder = []; S.audioClip = null; S.cur = null;
-    S.frame = 0; S.inF = S.outF = null; S.marks = new Set(); hist.undo = []; hist.redo = [];
+    S.frame = 0; S.inF = S.outF = null; S.marks = new Set(); S.ranges = []; S.selRange = null; hist.undo = []; hist.redo = [];
     layout();
     if (!silent && typeof App !== 'undefined') App.sessionChanged();
     changed();
@@ -486,6 +493,7 @@ const Player = (() => {
     syncOrder(); layout();
     S.frame = clamp(S.frame, 0, Math.max(0, total() - 1));
     S.inF = S.inF != null && S.inF < total() ? S.inF : null; S.outF = S.outF != null && S.outF < total() ? S.outF : null;
+    fitRanges();
     showFrame(S.frame);
     if (typeof App !== 'undefined') App.sessionChanged();
   }
@@ -512,7 +520,7 @@ const Player = (() => {
   function trimClip(c, tin, tout) {
     commit();
     c.tin = clamp(Math.round(tin), 0, c.media.frames - 1); c.tout = clamp(Math.round(tout), c.tin, c.media.frames - 1); c.auto = false;
-    S.inF = S.outF = null; layout(); showFrame(Math.min(S.frame, total() - 1)); toast('Trimmed');
+    S.inF = S.outF = null; S.selRange = null; fitRanges(); layout(); showFrame(Math.min(S.frame, total() - 1)); toast('Trimmed');
   }
   function trimToInOut() {
     if (S.inF == null && S.outF == null) { toast('Set an In or Out point first ( [ and ] )'); return; }
@@ -530,7 +538,7 @@ const Player = (() => {
     } else {
       for (const c of S.clips) { const L = len(c); c.tin = c.tin + Math.min(a, L - 1); c.tout = Math.min(c.tout, c.tin + (b - a)); c.auto = false; }
     }
-    S.inF = S.outF = null;
+    S.inF = S.outF = null; S.ranges = []; S.selRange = null;
     const nm = new Set(); for (const m of S.marks) if (m >= a && m <= b) nm.add(m - a); S.marks = nm;
     syncOrder(); layout(); showFrame(0); toast('Trimmed to In / Out');
     if (typeof App !== 'undefined') App.sessionChanged();
@@ -550,7 +558,7 @@ const Player = (() => {
       else { S.cur = keepClip.id; S.frame = keepLocal - keepClip.tin; }
     }
     S.frame = clamp(S.frame, 0, Math.max(0, total() - 1));
-    if (total() !== T0) { S.inF = S.outF = null; S.marks = new Set(); }
+    if (total() !== T0) { S.inF = S.outF = null; S.marks = new Set(); S.ranges = []; S.selRange = null; }
     layout(); showFrame(S.frame);
     if (wasPlaying) play(1);
     if (typeof App !== 'undefined') App.sessionChanged();
@@ -592,7 +600,7 @@ const Player = (() => {
     set onChange(fn) { changed = fn; },
     total, starts, locate, curClip, byId, len, fps, startF, endF, stackTop, hearClip,
     showFrame, play, pause, toggle, toggleDir, shuttle, stop, step, goto, goStart, goEnd, tick, setAudio, applyRate,
-    prevMark, nextMark, toggleMark, rangeStep, setIn, setOut, clearInOut, ranges,
+    prevMark, nextMark, toggleMark, rangeStep, setIn, setOut, clearInOut, ranges, fitRanges,
     layout, applyView, fitView, zoomAbout, pixelScale,
     addFiles, clearSession, split, removeClip, copyClip, cutClip, pasteClip, moveClip, trimClip, trimToInOut, modClip,
     setMode, cycleStack, undo, redo, commit, canUndo: () => hist.undo.length > 0, canRedo: () => hist.redo.length > 0, hasClipboard: () => !!clipboard,

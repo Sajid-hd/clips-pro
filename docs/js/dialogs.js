@@ -201,7 +201,7 @@ const Dialogs = (() => {
     auto.addEventListener('change', () => Settings.set('autoConvert', auto.checked));
     card.append(el('h2', {}, API ? 'This format needs converting' : 'This format can\'t play in this version'),
       el('div', {}, m.reason),
-      el('div', { class: 'muted' }, API ? 'Clips Pro will make a playable copy on your PC. The original file isn\'t changed, and exports still use the original.' : 'This version of Clips Pro can\'t convert files. Files like this will play in the full (Store) version, which converts them automatically.'),
+      el('div', { class: 'muted' }, API ? 'Clips Pro will make a playable copy on your PC. The original file isn\'t changed, and exports still use the original.' : 'This version of Clips Pro can\'t convert files. Files like this play in the Windows app (exe) version, which converts them automatically.'),
       API ? el('label', { class: 'check', for: 'cv-auto' }, auto, 'Convert files like this automatically') : null,
       el('div', { class: 'row' }, el('span'), API ? el('button', { class: 'primary', onclick: () => Media.convert(m), 'data-autofocus': true }, 'Convert') : null));
   }
@@ -216,6 +216,13 @@ const Dialogs = (() => {
     ['gif', 'Animated GIF', 'Looping GIF, up to 640 px wide at 15 fps.'],
     ['audio', 'Audio only (.m4a)', 'Just the sound, AAC.'],
     ['png', 'PNG image sequence', 'One PNG per frame, into a folder.'],
+    ['frame', 'Current frame (PNG)', 'The frame under the playhead at full quality.'],
+  ];
+  const PRESETS_CHROME = [
+    ['h264', 'MP4 · H.264', 'High quality MP4 that plays everywhere. Uses your graphics card to encode when it can.'],
+    ['small', 'Small file (share)', 'Smaller MP4 for sending and uploading.'],
+    ['webm', 'WebM · VP9', 'Open format for the web.'],
+    ['audio', 'Audio only (.m4a)', 'Just the sound.'],
     ['frame', 'Current frame (PNG)', 'The frame under the playhead at full quality.'],
   ];
   const PRESETS_WEB = [
@@ -272,32 +279,102 @@ const Dialogs = (() => {
     return job.cancel || !started ? null : new Blob(chunks, { type: 'video/webm' });
   }
 
-  function exportSegments(rangeKind) {
-    const T = Player.total(); const out = [];
-    const a = rangeKind === 'inout' ? Player.startF() : 0, b = rangeKind === 'inout' ? Player.endF() : T - 1;
-    const seg = (c, l0, l1) => ({ path: c.media.path, start: l0 / c.media.fps, end: (l1 + 1) / c.media.fps, rotate: c.rot, flipH: c.fh, flipV: c.fv, mute: c.mute, hasAudio: c.media.hasAudio, media: c.media });
-    if (S.mode === 'sequence') {
-      const st = Player.starts();
-      S.clips.forEach((c, i) => {
-        const s = st[i], e = s + Player.len(c) - 1;
-        if (e < a || s > b) return;
-        out.push(seg(c, c.tin + Math.max(0, a - s), c.tout - Math.max(0, e - b)));
-      });
+  // ---------- Chrome version: what gets exported, as files and parts ----------
+  // returns [{ name, segs:[{clip, media, l0, l1, mf, t0, dur}], k0, k1, fps }]
+  function webPlan(rk, how, nm, fps, split, mbps) {
+    const groups = [];
+    if (rk === 'ranges') {
+      const list = Ranges.exportable();
+      if (how === 'multi') for (const r of list) groups.push({ name: nm + '_' + Ranges.fileLabel(r), ivals: [[r.a, r.b]] });
+      else groups.push({ name: nm, ivals: list.map((r) => [r.a, r.b]) });
     } else {
-      const c = Player.curClip(); if (c) out.push(seg(c, c.tin + Math.min(a, Player.len(c) - 1), Math.min(c.tout, c.tin + b)));
+      const a = rk === 'inout' ? Player.startF() : 0, b = rk === 'inout' ? Player.endF() : Player.total() - 1;
+      groups.push({ name: nm, ivals: [[a, b]] });
     }
-    return out;
+    const files = [];
+    for (const gp of groups) {
+      const segs = [], cutsSec = []; let t = 0;
+      for (const [a, b] of gp.ivals) {
+        for (const p of Ranges.pieces(a, b)) {
+          const c = p.clip, mf = c.media.fps || 24, n = p.l1 - p.l0 + 1; if (n <= 0) continue;
+          for (const m of S.marks) if (m >= p.g0 && m <= p.g0 + n - 1) cutsSec.push(t + (m - p.g0) / mf);
+          segs.push({ clip: c, media: c.media, l0: p.l0, l1: p.l1, mf, t0: t, dur: n / mf });
+          t += n / mf;
+        }
+      }
+      if (!segs.length) continue;
+      const N = Math.max(1, Math.round(t * fps));
+      const ps = WebExport.parts(N, fps, split, cutsSec.map((x) => Math.round(x * fps)), mbps);
+      ps.forEach(([k0, k1], i) => files.push({ name: WebExport.partName(gp.name, i, ps.length), segs, k0, k1, fps }));
+    }
+    return files;
+  }
+  function drawClipFrame(g, v, W, H, c) {
+    g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+    const vw = v.videoWidth, vh = v.videoHeight; if (!vw) return;
+    const r = (((c.rot || 0) % 360) + 360) % 360, swap = r === 90 || r === 270;
+    const k = Math.min(W / (swap ? vh : vw), H / (swap ? vw : vh));
+    g.save(); g.translate(W / 2, H / 2); g.rotate((r * Math.PI) / 180); g.scale(c.fh ? -1 : 1, c.fv ? -1 : 1);
+    g.drawImage(v, (-vw * k) / 2, (-vh * k) / 2, vw * k, vh * k); g.restore();
+  }
+  // runs every file of the plan; out: { kind: 'file', handle } | { kind: 'dir', handle } | { kind: 'download' }
+  async function webRun(files, opt, out, ui) {
+    const ext = EXT[opt.preset]; const fails = []; let done = 0;
+    for (let i = 0; i < files.length; i++) {
+      if (opt.cancel.cancel) break;
+      const f = files[i];
+      const items = f.segs.filter((s) => s.media.hasAudio !== false && !s.clip.mute).map((s) => ({ media: s.media, at: s.t0 - f.k0 / f.fps, offset: s.l0 / s.mf, dur: s.dur }));
+      let writable = null;
+      try {
+        if (out.kind === 'file') writable = await out.handle.createWritable();
+        else if (out.kind === 'dir') writable = await (await out.handle.getFileHandle(f.name + ext, { create: true })).createWritable();
+        const res = await WebExport.encodeFile({
+          preset: opt.preset, width: opt.width, height: opt.height, fps: f.fps, quality: opt.quality, frames: f.k1 - f.k0, cancel: opt.cancel, writable,
+          hasAudio: items.length > 0,
+          audio: (t0, d) => WebExport.mixAudio(items, t0, d),
+          drawFrame: async (k, g, W, H) => {
+            const t = (f.k0 + k) / f.fps;
+            const s = f.segs.find((x) => t < x.t0 + x.dur - 1e-9) || f.segs[f.segs.length - 1];
+            const sf = Math.max(s.l0, Math.min(s.l1, s.l0 + Math.floor((t - s.t0) * s.mf + 1e-6)));
+            const v = await WebExport.videoFor(s.media); await WebExport.seekFrame(v, sf, s.mf);
+            drawClipFrame(g, v, W, H, s.clip);
+          },
+          onPct: (p, txt) => ui((i + p) / files.length, (files.length > 1 ? `Part ${i + 1} of ${files.length} · ` : '') + `${Math.round(((i + p) / files.length) * 100)}%` + (txt ? ' · ' + txt : '')),
+        });
+        if (res === null) break;
+        if (res instanceof Blob) await saveBlob(res, f.name + ext, 'Video', res.type, ext);
+        done++;
+      } catch (e) {
+        if (writable) { try { await writable.abort(); } catch (e2) {} }
+        fails.push(`${f.name}${ext}: ${e && e.message ? e.message : e}`);
+      }
+    }
+    const noSound = WebExport.takeAudioFailures();
+    WebExport.release();
+    return { done, fails, noSound };
   }
 
-  async function exportDialog() {
+  const segOf = (p) => { const c = p.clip; return { path: c.media.path, start: frameSec(p.l0, c.media.fps), end: frameSec(p.l1 + 1, c.media.fps), rotate: c.rot, flipH: c.fh, flipV: c.fv, mute: c.mute, hasAudio: c.media.hasAudio, media: c.media }; };
+  const segmentsFor = (a, b) => Ranges.pieces(a, b).map(segOf);
+  function exportSegments(rangeKind) {
+    const T = Player.total();
+    if (rangeKind === 'ranges') return Ranges.exportable().flatMap((r) => segmentsFor(r.a, r.b));
+    const a = rangeKind === 'inout' ? Player.startF() : 0, b = rangeKind === 'inout' ? Player.endF() : T - 1;
+    return segmentsFor(a, b);
+  }
+
+  async function exportDialog(opts = {}) {
     if (!S.clips.length) { toast('Open a video first'); return; }
     if (S.playing) Player.pause();
-    const LIST = API ? PRESETS : PRESETS_WEB;
+    const CHROME = !API && typeof WebExport !== 'undefined' && WebExport.supported();
+    const LIST = API ? PRESETS : CHROME ? PRESETS_CHROME : PRESETS_WEB;
+    const xo = CHROME ? WebExport.optionsUI({ srcFps: Player.fps(), marks: S.marks.size > 0, onChange: () => refresh() }) : null;
     let preset = Settings.get('exportPreset') || 'h264';
     if (!LIST.find((p) => p[0] === preset)) preset = LIST[0][0];
     let dir = Settings.get('exportDir') || (API ? await API.defaultDir() : '');
     const base = (Player.curClip().media.name || 'clip').replace(/\.[^.]+$/, '');
     const hasIO = S.inF != null || S.outF != null;
+    const hasR = S.ranges.length > 0;
     const presetList = el('div', { class: 'preset-list' }, el('h2', { style: 'margin:0 0 6px' }, 'Presets'));
     const nameIn = el('input', { type: 'text', id: 'ex-name', value: base + '_export' });
     const dirIn = el('input', { type: 'text', id: 'ex-dir', value: dir, style: 'flex:1;min-width:0' });
@@ -306,25 +383,62 @@ const Dialogs = (() => {
     const qSel = el('select', { id: 'ex-q' }, el('option', { value: 'high' }, 'High'), el('option', { value: 'medium' }, 'Medium'), el('option', { value: 'low' }, 'Low'));
     qSel.value = Settings.get('exportQuality') || 'high';
     const rWhole = el('input', { type: 'radio', name: 'ex-range', id: 'ex-r1', value: 'whole' }); const rIO = el('input', { type: 'radio', name: 'ex-range', id: 'ex-r2', value: 'inout' });
-    rWhole.checked = !hasIO; rIO.checked = hasIO; rIO.disabled = !hasIO;
+    const rR = el('input', { type: 'radio', name: 'ex-range', id: 'ex-r3', value: 'ranges' });
+    rWhole.checked = !hasIO && !hasR; rIO.checked = hasIO && !hasR; rIO.disabled = !hasIO; rR.checked = hasR; rR.disabled = !hasR;
+    if (opts.ranges && hasR) { rR.checked = true; rWhole.checked = rIO.checked = false; }
+    // ranges: one joined clip or one file per range — asked every time there are ranges
+    let how = opts.how || (Settings.get('exportHow') || '');
+    const howBox = el('div', { class: 'ex-how' });
+    const howCard = (k, t, sub) => el('button', { type: 'button', class: 'choice', 'data-how': k, onclick: () => { how = k; refresh(); } }, el('b', {}, t), el('span', {}, sub));
+    howBox.append(howCard('single', 'Single clip', 'All the ticked ranges joined into one video, in number order'), howCard('multi', 'Multiple clips', 'Every ticked range saved as its own file: name_01, name_02 …'));
+    const rangeChips = el('div', { class: 'ex-rchips' });
+    const howWrap = el('div', { class: 'fieldset', hidden: true }, el('span', {}, 'Export the ranges as'), howBox, rangeChips);
     const desc = el('div', { class: 'muted' });
     const summary = el('div', { style: 'display:flex;flex-direction:column;gap:6px' });
     const note = el('div', { class: 'muted small' });
     const prog = el('div', { hidden: true, style: 'display:flex;flex-direction:column;gap:6px' }, el('div', { class: 'bar' }, el('div')), el('div', { class: 'row' }, el('span', { class: 'pct mono' }, '0%'), el('span')));
     const errBox = el('div', { class: 'err', hidden: true });
     const browse = el('button', { class: 'secondary', style: 'height:32px', onclick: async () => { const d = await API.saveDialog({ title: 'Export to folder', defaultPath: dirIn.value, folder: true }); if (d) dirIn.value = d; } }, 'Browse');
-    const range = () => (rIO.checked ? 'inout' : 'whole');
+    const range = () => (rR.checked ? 'ranges' : rIO.checked ? 'inout' : 'whole');
+    const mbTxt = (mb) => (mb > 1024 ? (mb / 1024).toFixed(1) + ' GB' : Math.max(1, Math.round(mb)) + ' MB');
+    const outDims = () => {
+      const segs = exportSegments(range()); const m0 = (segs[0] && segs[0].media) || Player.curClip().media;
+      let w = m0.w || 1920, hh = m0.h || 1080;
+      const r0 = (((segs[0] ? segs[0].rotate : 0) || 0) % 360 + 360) % 360; if (r0 === 90 || r0 === 270) { const t = w; w = hh; hh = t; }
+      if (resSel.value !== 'source') { const H = +resSel.value; w = Math.round((H * w) / hh / 2) * 2; hh = H; }
+      return [w + (w % 2), hh + (hh % 2)];
+    };
+    const chromePlan = () => {
+      const [w, hh] = outDims(); const fps = xo.fps();
+      const nm = nameIn.value.trim().replace(/[\\/:*?"<>|]/g, '_') || 'export';
+      return webPlan(range(), range() === 'ranges' ? how : '', nm, fps, xo.split(), WebExport.mbpsFor(preset, w, hh, fps, qSel.value));
+    };
     function refresh() {
       for (const b of $$('button', presetList)) b.classList.toggle('on', b.dataset.p === preset);
       const p = LIST.find((x) => x[0] === preset);
       desc.textContent = p[2];
       const segs = exportSegments(range());
       const secs = segs.reduce((s, g) => s + (g.end - g.start), 0);
+      const useR = range() === 'ranges' && preset !== 'frame';
+      howWrap.hidden = !useR;
+      for (const b of $$('button', howBox)) b.classList.toggle('on', b.dataset.how === how);
+      if (useR) {
+        rangeChips.innerHTML = '';
+        for (const r of S.ranges) {
+          const ck = el('input', { type: 'checkbox' }); ck.checked = r.on !== false;
+          ck.addEventListener('change', () => { r.on = ck.checked; App.dirty = true; refresh(); });
+          rangeChips.append(el('label', { class: 'check ex-rchip', title: `${Player.frameText(r.a)} – ${Player.frameText(r.b)}` }, ck, Ranges.label(r)));
+        }
+      }
+      goBtn.disabled = useR && (!how || !Ranges.exportable().length);
+      goBtn.textContent = useR && how === 'multi' ? `Export ${Ranges.exportable().length} clips` : 'Export now';
+      nameNote.textContent = useR && how === 'multi' ? `Files: ${nameIn.value.trim() || 'export'}_${Ranges.exportable()[0] ? Ranges.fileLabel(Ranges.exportable()[0]) : '01'}${EXT[preset] || ''}, …` : '';
       const c0 = Player.curClip();
       const m0 = c0.media;
       const sizeMB = (() => {
         const H = resSel.value === 'source' ? m0.h : +resSel.value; const W = m0.w && m0.h ? Math.round(H * m0.w / m0.h) : H * 16 / 9;
         const q = qSel.value === 'low' ? 0.06 : qSel.value === 'medium' ? 0.1 : 0.16;
+        if (xo) return preset === 'frame' ? null : (WebExport.mbpsFor(preset, W, H, xo.fps(), qSel.value) * secs) / 8;
         let mbps = (W * H * Player.fps() * q) / 1e6;
         if (preset === 'small') mbps = (W * H * Player.fps() * 0.05) / 1e6; if (preset === 'prores') mbps = W * H * Player.fps() * 1.2 / 1e6;
         if (preset === 'audio') mbps = 0.256; if (preset === 'same') mbps = (m0.info && m0.info.bitRate) ? m0.info.bitRate / 1e6 : mbps;
@@ -333,17 +447,36 @@ const Dialogs = (() => {
         return (mbps * secs) / 8;
       })();
       summary.innerHTML = '';
+      const plan = xo && preset !== 'frame' ? chromePlan() : null;
+      if (plan) {
+        const outFps = xo.fps();
+        goBtn.disabled = !plan.length || (useR && !how);
+        goBtn.textContent = plan.length > 1 ? `Export ${plan.length} files` : 'Export now';
+        nameNote.textContent = plan.length > 1 ? `Files: ${plan.slice(0, 3).map((f) => f.name + EXT[preset]).join(', ')}${plan.length > 3 ? ', …' : ''}` : '';
+        const totalK = plan.reduce((a, f) => a + f.k1 - f.k0, 0);
+        summary.append(
+          el('div', { class: 'row' }, el('span', {}, 'Length'), el('span', { class: 'mono', style: 'color:#e6e7ea' }, fmtTC(totalK, outFps))),
+          el('div', { class: 'row' }, el('span', {}, 'Frame rate'), el('span', { style: 'color:#e6e7ea' }, preset === 'audio' ? '—' : WebExport.niceFps(outFps) + ' fps')),
+          el('div', { class: 'row' }, el('span', {}, 'Files'), el('span', { style: 'color:#e6e7ea' }, String(plan.length))),
+          sizeMB != null ? el('div', { class: 'row' }, el('span', {}, plan.length > 1 ? 'Each part' : 'Estimated size'), el('span', { style: 'color:#e6e7ea' }, '≈ ' + mbTxt(plan.length > 1 ? sizeMB * (plan[0].k1 - plan[0].k0) / Math.max(1, totalK) : sizeMB))) : null,
+          plan.length > 1 && sizeMB != null ? el('div', { class: 'row' }, el('span', {}, 'All parts'), el('span', { style: 'color:#e6e7ea' }, '≈ ' + mbTxt(sizeMB))) : null);
+        xo.setDisabled(preset === 'audio', false);
+      } else {
+        if (xo) xo.setDisabled(true, true);
       summary.append(
         el('div', { class: 'row' }, el('span', {}, 'Length'), el('span', { class: 'mono', style: 'color:#e6e7ea' }, preset === 'frame' ? '1 frame' : fmtTC(Math.round(secs * Player.fps()), Player.fps()))),
-        el('div', { class: 'row' }, el('span', {}, 'Clips'), el('span', { style: 'color:#e6e7ea' }, preset === 'frame' ? '1' : String(segs.length))),
+        el('div', { class: 'row' }, el('span', {}, range() === 'ranges' && how === 'multi' ? 'Files' : 'Clips'), el('span', { style: 'color:#e6e7ea' }, preset === 'frame' ? '1' : range() === 'ranges' && how === 'multi' ? String(Ranges.exportable().length) : String(segs.length))),
         sizeMB != null ? el('div', { class: 'row' }, el('span', {}, 'Estimated size'), el('span', { style: 'color:#e6e7ea' }, '≈ ' + (sizeMB > 1024 ? (sizeMB / 1024).toFixed(1) + ' GB' : Math.max(1, Math.round(sizeMB)) + ' MB'))) : null);
-      note.textContent = (S.mode !== 'sequence' ? `${MODE_TXT[S.mode][0]} mode: exports the selected clip (${c0.media.name}). ` : '') + (API ? '' : 'MP4, ProRes, GIF and fast trimmed copies come with the full (Store) version.');
+      }
+      note.textContent = (S.mode !== 'sequence' ? `${MODE_TXT[S.mode][0]} mode: exports the selected clip (${c0.media.name}). ` : '') + (API ? '' : CHROME ? 'Every frame is drawn exactly, then encoded by Chrome on your PC. Nothing is uploaded.' : 'Exporting MP4 needs an up-to-date Chrome or Edge.');
       resSel.disabled = ['same', 'audio', 'frame'].includes(preset);
       qSel.disabled = !['h264', 'webm', 'webmrt'].includes(preset);
-      rWhole.disabled = rIO.disabled = preset === 'frame'; if (hasIO && preset !== 'frame') rIO.disabled = false;
+      rWhole.disabled = rIO.disabled = rR.disabled = preset === 'frame'; if (hasIO && preset !== 'frame') rIO.disabled = false; if (hasR && preset !== 'frame') rR.disabled = false;
     }
     for (const [k, t] of LIST) presetList.append(el('button', { 'data-p': k, onclick: () => { preset = k; refresh(); } }, t));
-    [resSel, qSel, rWhole, rIO].forEach((x) => x.addEventListener('change', refresh));
+    const nameNote = el('span', { class: 'muted small' });
+    [resSel, qSel, rWhole, rIO, rR].forEach((x) => x.addEventListener('change', refresh));
+    nameIn.addEventListener('input', () => refresh());
     const center = el('div', { class: 'mb', style: 'flex:1;min-width:0' },
       desc,
       el('div', { class: 'kv-grid' },
@@ -351,8 +484,11 @@ const Dialogs = (() => {
         API ? el('div', { class: 'fieldset' }, el('span', {}, 'Save to'), el('div', { style: 'display:flex;gap:6px' }, dirIn, browse)) : el('div', { class: 'fieldset' }, el('span', {}, 'Save to'), el('span', { class: 'muted', style: 'padding-top:7px' }, 'You choose where when you click Export now')),
         el('label', { class: 'fieldset', for: 'ex-res' }, el('span', {}, 'Resolution'), resSel),
         el('label', { class: 'fieldset', for: 'ex-q' }, el('span', {}, 'Quality'), qSel)),
+      xo ? xo.node : null,
       el('div', { class: 'fieldset' }, el('span', {}, 'Range'),
-        el('div', { style: 'display:flex;gap:16px' }, el('label', { class: 'check', for: 'ex-r1' }, rWhole, 'Whole session'), el('label', { class: 'check', for: 'ex-r2' }, rIO, hasIO ? 'In to Out' : 'In to Out (set [ and ] first)'))),
+        el('div', { style: 'display:flex;gap:16px;flex-wrap:wrap' }, el('label', { class: 'check', for: 'ex-r1' }, rWhole, 'Whole session'), el('label', { class: 'check', for: 'ex-r2' }, rIO, hasIO ? (Ranges.sel() ? `Selected range (${Ranges.label(Ranges.sel())})` : 'In to Out') : 'In to Out (set [ and ] first)'),
+          el('label', { class: 'check', for: 'ex-r3' }, rR, hasR ? `Numbered ranges (${S.ranges.length})` : 'Numbered ranges (none yet)'))),
+      howWrap, nameNote,
       note, prog, errBox);
     const right = el('div', { style: 'width:220px;flex:none;border-left:1px solid #2a2c31;padding:16px;display:flex;flex-direction:column;gap:10px;background:#19191d' }, el('h2', {}, 'Summary'), summary);
     const body = el('div', { style: 'display:flex;min-height:380px' }, presetList, center, right);
@@ -377,11 +513,27 @@ const Dialogs = (() => {
           if (await saveBlob(blob, nm + '.png', 'PNG image', 'image/png', '.png')) { toast('Frame saved'); h.close(); }
           return;
         }
+        if (CHROME) { await chromeExport(); return; }
         // choose where to save first (needs the click), then record
         let handle = null;
         if (window.showSaveFilePicker) {
           try { handle = await showSaveFilePicker({ suggestedName: nm + '.webm', types: [{ description: 'WebM video', accept: { 'video/webm': ['.webm'] } }] }); }
           catch (e) { if (e && e.name === 'AbortError') return; }
+        }
+        if (range() === 'ranges' && how === 'multi') {
+          Settings.set('exportHow', how);
+          const list = Ranges.exportable();
+          prog.hidden = false; errBox.hidden = true; goBtn.disabled = true; cancelBtn.textContent = 'Stop'; webJob.cancel = false; running = 'web';
+          const bar = prog.querySelector('.bar>div'), pct = prog.querySelector('.pct');
+          for (let k = 0; k < list.length && !webJob.cancel; k++) {
+            const sg = segmentsFor(list[k].a, list[k].b).map((s) => ({ ...s, url: s.media.playUrl })); if (!sg.length) continue;
+            const m0 = sg[0].media; let w = m0.w || 1280, hh = m0.h || 720;
+            if (resSel.value !== 'source') { const H = +resSel.value; w = Math.round((H * w) / hh / 2) * 2; hh = H; }
+            const blob = await recordWebm({ segments: sg, width: w, height: hh, fps: Math.min(60, Math.round(Player.fps())), quality: qSel.value, job: webJob, onPct: (p) => { const t = (k + p) / list.length; bar.style.width = (t * 100).toFixed(1) + '%'; pct.textContent = `${k + 1} of ${list.length} · ${Math.round(t * 100)}%`; } });
+            if (blob) await saveBlob(blob, `${nm}_${Ranges.fileLabel(list[k])}.webm`, 'WebM video', 'video/webm', '.webm');
+          }
+          running = null; goBtn.disabled = false; cancelBtn.textContent = 'Close'; pct.textContent = webJob.cancel ? 'Stopped' : 'Done';
+          return;
         }
         const segs = exportSegments(range()).map((s) => ({ ...s, url: s.media.playUrl }));
         if (!segs.length) { toast('Nothing to export'); return; }
@@ -405,8 +557,10 @@ const Dialogs = (() => {
         return;
       }
       Settings.set('exportPreset', preset); Settings.set('exportRes', resSel.value); Settings.set('exportQuality', qSel.value); Settings.set('exportDir', dirIn.value);
+      if (range() === 'ranges' && preset !== 'frame') Settings.set('exportHow', how);
+      if (range() === 'ranges' && how === 'multi' && preset !== 'frame') { await exportMulti(); return; }
       let segs = exportSegments(range());
-      if (preset === 'frame') { const L = Player.locate(S.frame); const c = L.clip; segs = [{ path: c.media.path, start: (L.local + 0.5) / c.media.fps, end: (L.local + 1) / c.media.fps, rotate: c.rot, flipH: c.fh, flipV: c.fv }]; }
+      if (preset === 'frame') { const L = Player.locate(S.frame); const c = L.clip; segs = [{ path: c.media.path, start: frameSec(L.local, c.media.fps), end: frameSec(L.local + 1, c.media.fps), rotate: c.rot, flipH: c.fh, flipV: c.fv }]; }
       if (!segs.length) { toast('Nothing to export'); return; }
       const sep = API.platform === 'win32' ? '\\' : '/';
       let ext = EXT[preset];
@@ -431,6 +585,61 @@ const Dialogs = (() => {
       } else if (r.cancelled) { pct.textContent = 'Stopped'; }
       else { errBox.hidden = false; errBox.textContent = 'Export failed.\n' + (r.error || ''); pct.textContent = 'Failed'; }
     });
+    // Chrome version: exact frames, chosen frame rate, optional parts
+    async function chromeExport() {
+      if (range() === 'ranges' && !how) { toast('Choose Single clip or Multiple clips'); return; }
+      const plan = chromePlan(); if (!plan.length) { toast('Nothing to export'); return; }
+      const ext = EXT[preset];
+      // where to save: asked straight away (Chrome needs the click)
+      let out = { kind: 'download' };
+      try {
+        if (plan.length === 1 && window.showSaveFilePicker) out = { kind: 'file', handle: await showSaveFilePicker({ suggestedName: plan[0].name + ext, id: 'clipspro-export', types: [{ description: preset === 'audio' ? 'Audio' : 'Video', accept: { [preset === 'webm' ? 'video/webm' : preset === 'audio' ? 'audio/mp4' : 'video/mp4']: [ext] } }] }) };
+        else if (plan.length > 1 && window.showDirectoryPicker) out = { kind: 'dir', handle: await showDirectoryPicker({ id: 'clipspro-export', mode: 'readwrite' }) };
+      } catch (e) { if (e && e.name === 'AbortError') return; out = { kind: 'download' }; }
+      if (out.kind === 'file') plan[0].name = out.handle.name.replace(/\.[^.]+$/, '');
+      const [w, hh] = outDims();
+      prog.hidden = false; errBox.hidden = true; goBtn.disabled = true; cancelBtn.textContent = 'Stop'; webJob.cancel = false; running = 'web';
+      const bar = prog.querySelector('.bar>div'), pct = prog.querySelector('.pct');
+      const r = await webRun(plan, { preset, width: w, height: hh, quality: qSel.value, cancel: webJob }, out, (p, txt) => { bar.style.width = (p * 100).toFixed(1) + '%'; pct.textContent = txt; });
+      running = null; goBtn.disabled = false; cancelBtn.textContent = 'Close';
+      if (webJob.cancel) { pct.textContent = `Stopped after ${r.done} of ${plan.length}`; return; }
+      bar.style.width = '100%';
+      pct.textContent = plan.length > 1 ? `Done: ${r.done} of ${plan.length} files` + (out.kind === 'dir' ? ` in ${out.handle.name}` : '') : r.done ? 'Done' : 'Failed';
+      const msgs = [];
+      if (r.fails.length) msgs.push((r.done ? 'Some files did not export.\n' : 'Export failed.\n') + r.fails.join('\n'));
+      if (r.noSound.length) msgs.push('Chrome could not read the sound of: ' + r.noSound.join(', ') + ' (exported without its sound).');
+      if (msgs.length) { errBox.hidden = false; errBox.textContent = msgs.join('\n\n'); }
+      if (r.done) toast(plan.length > 1 ? `Exported ${r.done} files` : 'Exported ' + plan[0].name + ext);
+    }
+    // one file per numbered range
+    async function exportMulti() {
+      const list = Ranges.exportable(); if (!list.length) { toast('Tick at least one range'); return; }
+      const sep = API.platform === 'win32' ? '\\' : '/';
+      const dir = dirIn.value.replace(/[\\/]+$/, ''), nm = nameIn.value.trim().replace(/[\\/:*?"<>|]/g, '_') || 'export';
+      prog.hidden = false; errBox.hidden = true; goBtn.disabled = true; cancelBtn.textContent = 'Stop';
+      const bar = prog.querySelector('.bar>div'), pct = prog.querySelector('.pct');
+      const fails = []; let done = 0, last = '';
+      for (let k = 0; k < list.length; k++) {
+        const r = list[k];
+        const segs = segmentsFor(r.a, r.b); if (!segs.length) continue;
+        let ext = EXT[preset];
+        if (preset === 'same') { const n = segs[0].media ? segs[0].media.name : ''; ext = n.includes('.') ? n.slice(n.lastIndexOf('.')) : '.mp4'; }
+        const output = dir + sep + nm + '_' + Ranges.fileLabel(r) + ext;
+        const m0 = segs[0].media; let w = m0.w || 1920, hgt = m0.h || 1080;
+        const r0 = ((segs[0].rotate || 0) % 360 + 360) % 360; if (r0 === 90 || r0 === 270) { const t = w; w = hgt; hgt = t; }
+        if (resSel.value !== 'source') { const H = +resSel.value; w = Math.round((H * w) / hgt / 2) * 2; hgt = H; }
+        const id = 'export-' + Date.now() + '-' + k; running = id;
+        Dialogs._progress = (p) => { if (p.id === id) { const t = (k + p.pct) / list.length; bar.style.width = (t * 100).toFixed(1) + '%'; pct.textContent = `${k + 1} of ${list.length} · ${Math.round(t * 100)}%`; } };
+        const res = await API.exportJob({ id, segments: segs.map(({ media, ...x }) => x), output, preset, width: w, height: hgt, fps: Player.fps(), quality: qSel.value });
+        if (res.cancelled) { running = null; Dialogs._progress = null; goBtn.disabled = false; cancelBtn.textContent = 'Close'; pct.textContent = `Stopped after ${done} of ${list.length}`; return; }
+        if (res.ok) { done++; last = output; } else fails.push(`Range ${Ranges.label(r)}: ${(res.error || '').split('\n').filter(Boolean).pop() || 'failed'}`);
+      }
+      running = null; Dialogs._progress = null; goBtn.disabled = false; cancelBtn.textContent = 'Close';
+      bar.style.width = '100%'; pct.textContent = `Done: ${done} of ${list.length} clips`;
+      if (last) { const sp = prog.querySelector('.row span:last-child'); sp.innerHTML = ''; sp.append(el('button', { class: 'secondary', style: 'height:30px', onclick: () => API.showInFolder(last) }, 'Show in folder')); }
+      if (fails.length) { errBox.hidden = false; errBox.textContent = 'Some clips did not export.\n' + fails.join('\n'); }
+      toast(`Exported ${done} ${done === 1 ? 'clip' : 'clips'}`);
+    }
   }
 
   // ---------- settings ----------
@@ -499,7 +708,7 @@ const Dialogs = (() => {
       } else if (t === 'formats' && !API) {
         pane.append(el('h2', {}, 'File formats'),
           el('div', {}, el('b', {}, 'Plays: '), 'MP4, MOV, M4V, MKV and WebM with H.264, H.265 (HEVC, if your PC supports it), VP9 or AV1 video; AAC, MP3, Opus, FLAC audio; WAV and MP3 files.'),
-          el('div', {}, el('b', {}, 'Doesn\'t play in this version: '), 'ProRes, DNxHD / DNxHR, AVI, WMV, MPEG-2, MXF, MTS / M2TS and similar. The full (Store) version converts these automatically.'),
+          el('div', {}, el('b', {}, 'Doesn\'t play in this version: '), 'ProRes, DNxHD / DNxHR, AVI, WMV, MPEG-2, MXF, MTS / M2TS and similar. The Windows app (exe) version converts these automatically.'),
           el('div', { class: 'muted' }, 'Frame rate is measured from the video when it opens.'));
       } else if (t === 'formats') {
         const sizeTxt = el('span', { class: 'mono' }, '…');
@@ -530,7 +739,7 @@ const Dialogs = (() => {
           el('li', {}, 'In File Explorer, right-click any video (for example an .mp4).'),
           el('li', {}, 'Choose ', el('b', {}, 'Open with'), ' → ', el('b', {}, 'Choose another app'), '.'),
           el('li', {}, 'Pick ', el('b', {}, 'Clips Pro'), ' and click ', el('b', {}, 'Always'), '.'),
-          el('li', {}, 'The first time, Edge asks to let Clips Pro open that file type. Tick "Don\'t ask again" and click ', el('b', {}, 'Allow'), '.'),
+          el('li', {}, 'The first time, Chrome asks to let Clips Pro open that file type. Tick "Don\'t ask again" and click ', el('b', {}, 'Allow'), '.'),
           el('li', {}, 'Repeat once for each type you use (.mov, .mkv, .webm…).')),
         el('div', { class: 'muted' }, 'You can also set it in Windows Settings → Apps → Default apps → Clips Pro.'));
     }
@@ -554,7 +763,7 @@ const Dialogs = (() => {
   }
 
   function about() {
-    const v = el('span', {}, '1.0.0'); if (API) API.version().then((x) => { v.textContent = x; });
+    const v = el('span', {}, '1.0.0'); if (API) API.version().then((x) => { v.textContent = x; }); else fetch('version.json').then((r) => r.json()).then((j) => { v.textContent = j.version + ' (Chrome app)'; }).catch(() => {});
     const h = Modal.open({ title: 'About Clips Pro', width: 460, body: el('div', { class: 'mb' },
       el('div', { style: 'display:flex;align-items:center;gap:14px' }, el('div', { class: 'big-logo' }, el('span', {}, 'C'), el('b', {}, 'P')), el('div', {}, el('h2', {}, 'Clips Pro'), el('div', { class: 'muted' }, 'Version ', v))),
       el('div', { class: 'muted' }, 'Video player and editor. Uses FFmpeg (LGPL) for reading, converting and exporting files. Your videos never leave your PC.')),
@@ -563,7 +772,7 @@ const Dialogs = (() => {
 
   function shortcutsSheet() { return settingsDialog('keys'); }
 
-  // Web version opened in a normal Edge tab: offer to install
+  // Web version opened in a normal Chrome tab: offer to install
   let installEvt = null;
   addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEvt = e; const b = document.querySelector('#install-now'); if (b) b.disabled = false; });
   addEventListener('appinstalled', () => { Modal.closeTop(); toast('Clips Pro installed. Open it from the Start menu.'); });
@@ -575,14 +784,59 @@ const Dialogs = (() => {
       body: el('div', { class: 'mb' },
         el('div', {}, 'Install Clips Pro as an app on this PC. It gets its own window and Start menu icon, works offline, and can be your default video player. Your videos never leave your PC.'),
         el('ol', { class: 'steps' },
-          el('li', {}, 'Click ', el('b', {}, 'Install Clips Pro'), ' below (or the app icon at the right end of Edge\'s address bar).'),
-          el('li', {}, 'Click ', el('b', {}, 'Install'), ' in Edge\'s box. Clips Pro opens in its own window.'),
-          el('li', {}, 'Allow it to be pinned to Start / taskbar if Edge asks.')),
-        el('div', { class: 'muted small' }, 'If the button stays grey, use Edge\'s ⋯ menu → Apps → Install Clips Pro.')),
+          el('li', {}, 'Click ', el('b', {}, 'Install Clips Pro'), ' below (or the install icon at the right end of Chrome\'s address bar).'),
+          el('li', {}, 'Click ', el('b', {}, 'Install'), ' in Chrome\'s box. Clips Pro opens in its own window.'),
+          el('li', {}, 'Allow it to be pinned to Start / taskbar if Chrome asks.')),
+        el('div', { class: 'muted small' }, 'If the button stays grey, use Chrome\'s ⋮ menu → Cast, save and share → Install page as app.')),
       footer: el('div', { class: 'mf' }, el('button', { class: 'secondary', onclick: () => h.close() }, 'Use in the browser'), btn),
     });
   }
 
-  return { chooseOpen, Trim, renderInfo, renderConvert, exportDialog, settingsDialog, firstRun, about, shortcutsSheet, installTip, MODE_TXT };
+  // ---------- updates (installed app) ----------
+  function restartPrompt(v) {
+    const h = Modal.open({
+      title: 'Update installed', width: 460,
+      body: el('div', { class: 'mb' }, el('div', {}, `Clips Pro ${v} is ready. Restart to start using it.`), el('div', { class: 'muted small' }, 'If the new version has a problem starting, Clips Pro goes back to the version you have now automatically.')),
+      footer: el('div', { class: 'mf' }, el('button', { class: 'secondary', onclick: () => h.close() }, 'Later'), el('button', { class: 'primary', onclick: () => API.restart() }, 'Restart now')),
+    });
+  }
+  async function checkUpdates() {
+    if (!API) { toast('Updates are for the installed app'); return; }
+    const body = el('div', { class: 'mb' }, el('div', { class: 'muted' }, 'Checking…'));
+    const foot = el('div', { class: 'mf' });
+    const h = Modal.open({ title: 'Check for updates', width: 500, body, footer: foot });
+    const fromFile = el('button', { class: 'secondary', onclick: () => { h.close(); installFromFile(); } }, 'Install from file…');
+    const r = await API.updateCheck();
+    body.innerHTML = ''; foot.innerHTML = '';
+    const ver = await API.version();
+    if (!r.ok) {
+      body.append(el('div', {}, r.error), el('div', { class: 'muted' }, `You have Clips Pro ${ver}. If Claude sent you an update zip, use Install from file.`));
+      foot.append(fromFile, el('button', { class: 'primary', onclick: () => h.close() }, 'OK'));
+      return;
+    }
+    if (!r.newer) {
+      body.append(el('div', {}, `You have the latest version (${r.current}).`));
+      foot.append(fromFile, el('button', { class: 'primary', onclick: () => h.close() }, 'OK'));
+      return;
+    }
+    const st = el('div', { class: 'muted' });
+    const go = el('button', { class: 'primary' }, `Install ${r.latest}`);
+    body.append(el('div', {}, `Clips Pro ${r.latest} is available (you have ${r.current}).`), r.notes ? el('div', { class: 'muted', style: 'white-space:pre-wrap' }, r.notes) : null, st);
+    foot.append(el('button', { class: 'secondary', onclick: () => h.close() }, 'Later'), go);
+    go.addEventListener('click', async () => {
+      go.disabled = true; st.textContent = 'Downloading…';
+      const res = await API.updateInstallUrl({ url: r.url, sha256: r.sha256 });
+      if (res.ok) { h.close(); restartPrompt(res.version); } else { st.textContent = res.error; go.disabled = false; }
+    });
+  }
+  async function installFromFile() {
+    if (!API) { toast('Updates are for the installed app'); return; }
+    const res = await API.updateInstallFile();
+    if (res.cancelled) return;
+    if (res.ok) restartPrompt(res.version);
+    else { const h = Modal.open({ title: 'Update not installed', width: 460, body: el('div', { class: 'mb' }, el('div', {}, res.error)), footer: el('div', { class: 'mf' }, el('button', { class: 'primary', onclick: () => h.close() }, 'OK')) }); }
+  }
+
+  return { chooseOpen, Trim, renderInfo, renderConvert, exportDialog, settingsDialog, firstRun, about, shortcutsSheet, installTip, checkUpdates, installFromFile, MODE_TXT };
 })();
 if (API) API.onJobProgress((p) => { if (Dialogs._progress) Dialogs._progress(p); });

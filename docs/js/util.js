@@ -47,7 +47,8 @@ const DEFAULT_SETTINGS = {
   display: 'source', showInfo: true, showCache: true, showControls: true, timelineTop: false,
   resizeToVideo: true, autoConvert: false, volume: 1, muted: false,
   keys: null, keyPreset: 'clipspro', firstRunDone: false,
-  exportPreset: 'h264', exportQuality: 'high', exportRes: 'source', exportDir: '',
+  exportPreset: 'h264', exportQuality: 'high', exportRes: 'source', exportDir: '', exportHow: '',
+  cutSens: 'medium', cutGradual: true, cutMarks: false, cutMin: 0.4,
 };
 const Settings = (() => {
   let s = { ...DEFAULT_SETTINGS };
@@ -75,6 +76,7 @@ const S = {
   playing: false, dir: 1, speed: 1,
   loopMode: Settings.get('loopMode'),
   inF: null, outF: null, marks: new Set(),
+  ranges: [], selRange: null,  // numbered In/Out ranges 1, 2, 3 … ; selRange is the one In/Out shows
   allFrames: Settings.get('allFrames'), audioScrub: Settings.get('audioScrub'),
   display: Settings.get('display'),
   combine: 'over', wipes: true, wipeX: 0.5,
@@ -84,6 +86,8 @@ const S = {
 };
 
 // ---------- formatting ----------
+// Time to ask ffmpeg for so it returns exactly source frame f (it keeps frames whose time is >= this)
+const frameSec = (f, fps) => Math.max(0, (f - 0.02) / (fps || 24));
 function pad(n, w = 2) { return String(n).padStart(w, '0'); }
 function fmtDur(sec) {
   if (!isFinite(sec)) return '--:--';
@@ -113,6 +117,8 @@ async function saveBlob(blob, name, desc, mime, ext) {
 }
 
 let toastT = 0;
+// set a button's icon only when it changes: replacing it while the mouse is pressed cancels the click
+function setIcon(b, html) { if (b._icon !== html) { b._icon = html; b.innerHTML = html; } }
 function toast(msg, ms = 2200) {
   const t = $('#toast'); t.textContent = msg; t.hidden = false;
   clearTimeout(toastT); toastT = setTimeout(() => { t.hidden = true; }, ms);

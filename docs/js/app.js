@@ -31,6 +31,12 @@ const App = (() => {
     setIn: () => Player.setIn(),
     setOut: () => Player.setOut(),
     clearInOut: () => Player.clearInOut(),
+    clearSel: () => Ranges.clearSelection(),
+    clearRanges: () => Ranges.clearAll(),
+    prevRangeN: () => stepRange(-1),
+    nextRangeN: () => stepRange(1),
+    rangesPanel: () => Ranges.toggle(),
+    detectCuts: () => Ranges.detectDialog(),
     mark: () => Player.toggleMark(),
     prevMark: () => Player.prevMark(),
     nextMark: () => Player.nextMark(),
@@ -66,7 +72,7 @@ const App = (() => {
     cut: () => Player.cutClip(),
     copy: () => Player.copyClip(),
     paste: () => Player.pasteClip(),
-    del: () => { const c = cur(); if (c) { Player.removeClip(c); toast('Clip removed'); } },
+    del: () => { const ms = Ranges.multiIds(); if (ms.length > 1) { Ranges.removeMany(ms); return; } if (Ranges.sel()) { Ranges.remove(S.selRange); return; } if (S.marks.has(S.frame)) { Ranges.deleteMark(S.frame); return; } const c = cur(); if (c) { Player.removeClip(c); toast('Clip removed'); } },
     trim: () => { if (has()) Dialogs.Trim.open(); },
     trimInOut: () => Player.trimToInOut(),
     split: () => Player.split(),
@@ -76,13 +82,49 @@ const App = (() => {
     flipV: () => Player.modClip((c) => { c.fv = !c.fv; }, 'Flipped vertically'),
     clipMute: () => Player.modClip((c) => { c.mute = !c.mute; Player.setAudio(); }, null),
     settings: () => Dialogs.settingsDialog(),
+    tracker: () => Tracker.toggle(),
+    editMode: () => (typeof Editor !== 'undefined' ? Editor.toggle() : null),
   };
-  const NEEDS_MEDIA = new Set(['playPause', 'toggleDir', 'playRev', 'stepBack', 'stepFwd', 'shuttleBack', 'shuttleFwd', 'goStart', 'goEnd', 'setIn', 'setOut', 'mark', 'trim', 'trimInOut', 'split', 'export', 'saveFrame', 'copyFrame', 'cut', 'copy', 'del', 'rotL', 'rotR']);
+  const NEEDS_MEDIA = new Set(['detectCuts', 'prevRangeN', 'nextRangeN', 'playPause', 'toggleDir', 'playRev', 'stepBack', 'stepFwd', 'shuttleBack', 'shuttleFwd', 'goStart', 'goEnd', 'setIn', 'setOut', 'mark', 'trim', 'trimInOut', 'split', 'export', 'saveFrame', 'copyFrame', 'cut', 'copy', 'del', 'rotL', 'rotR']);
   function run(id) {
     if (NEEDS_MEDIA.has(id) && !has()) return;
     const f = A[id]; if (f) f(); dirty = true;
   }
 
+  function stepRange(d) {
+    if (!S.ranges.length) { toast('No numbered ranges yet'); return; }
+    const i = S.ranges.findIndex((r) => r.id === S.selRange);
+    let j;
+    if (i < 0) { const after = S.ranges.findIndex((r) => r.a >= S.frame); j = d > 0 ? (after < 0 ? S.ranges.length - 1 : after) : (after < 0 ? S.ranges.length - 1 : Math.max(0, after - 1)); }
+    else j = clamp(i + d, 0, S.ranges.length - 1);
+    const r = S.ranges[j]; Ranges.select(r.id); Player.goto(r.a); toast('Range ' + Ranges.label(r));
+  }
+  // ---------- window (title bar, CP icon) ----------
+  async function winCmd(c) { if (API) return API.windowCmd(c); if (c === 'close') window.close(); }
+  function windowMenu(x, y) {
+    Menu.open([
+      { label: 'Restore', disabled: !API || !S.winMax, action: () => winCmd('restore') },
+      { label: 'Minimise', disabled: !API, action: () => winCmd('minimize') },
+      { label: 'Maximise', disabled: !API || S.winMax, action: () => winCmd('maximize') },
+      { sep: true },
+      { label: 'Snap to left half', kb: 'Win+←', disabled: !API, action: () => winCmd('snap-left') },
+      { label: 'Snap to right half', kb: 'Win+→', disabled: !API, action: () => winCmd('snap-right') },
+      { label: 'Centre on screen', disabled: !API, action: () => winCmd('center') },
+      { label: 'Move to next monitor', kb: 'Win+Shift+→', disabled: !API, action: () => winCmd('next-monitor') },
+      { label: 'Always on top', checked: () => !!S.onTop, disabled: !API, action: () => { S.onTop = !S.onTop; API.setOnTop(S.onTop); } },
+      { label: 'Full screen', key: 'fullscreen', action: () => run('fullscreen') },
+      { sep: true },
+      { label: 'Close', kb: 'Alt+F4', action: () => winCmd('close') },
+    ], x, y);
+  }
+  {
+    const logo = $('#titlebar .logo');
+    logo.setAttribute('role', 'button'); logo.setAttribute('aria-label', 'Window menu'); logo.title = 'Window menu (double-click to close)';
+    let t = 0;
+    logo.addEventListener('mousedown', (e) => { if (e.button !== 0) return; e.preventDefault(); const now = Date.now(); if (now - t < 450) { t = 0; Menu.closeAll(); winCmd('close'); return; } t = now; const r = logo.getBoundingClientRect(); windowMenu(r.left, r.bottom + 2); });
+    logo.addEventListener('contextmenu', (e) => { e.preventDefault(); windowMenu(e.clientX, e.clientY); });
+    if (API && API.onWindowState) API.onWindowState((st) => { S.winMax = !!st.maximized; document.body.classList.toggle('win-max', S.winMax); });
+  }
   function setVolume(v) { S.volume = clamp(Math.round(v * 100) / 100, 0, 1); S.muted = false; Settings.set('volume', S.volume); Settings.set('muted', false); Player.setAudio(); dirty = true; toast('Volume ' + Math.round(S.volume * 100) + '%', 900); }
   function toggleFullscreen() {
     if (API) API.toggleFullscreen();
@@ -110,7 +152,7 @@ const App = (() => {
       else { try { await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]); toast('Frame copied'); } catch (e) { toast('Could not copy the frame'); } }
       return;
     }
-    const sec = (L.local + 0.5) / c.media.fps;
+    const sec = frameSec(L.local, c.media.fps);
     const tf = []; const r = ((c.rot % 360) + 360) % 360;
     if (r === 90) tf.push('transpose=1'); else if (r === 180) tf.push('transpose=1,transpose=1'); else if (r === 270) tf.push('transpose=2');
     if (c.fh) tf.push('hflip'); if (c.fv) tf.push('vflip');
@@ -183,9 +225,8 @@ const App = (() => {
     { sep: true }, { label: 'Wipes', key: 'wipes', checked: () => S.wipes, action: () => run('wipes') },
     { label: 'Cycle forward', key: 'cycleFwd', action: () => run('cycleFwd') }, { label: 'Cycle backward', key: 'cycleBack', action: () => run('cycleBack') }];
   const noMedia = () => !has();
-  const soon = { label: 'Open in full editor (next update)', disabled: true };
 
-  Menu.bar([
+  function setCompactMenus() { Menu.bar([
     ['File', () => [
       { label: 'Open…', key: 'open', action: () => run('open') },
       { label: 'Add to session…', key: 'addFiles', action: () => run('addFiles') },
@@ -211,6 +252,8 @@ const App = (() => {
       { sep: true },
       { label: 'Trim…', key: 'trim', disabled: noMedia, action: () => run('trim') },
       { label: 'Trim to In / Out', key: 'trimInOut', disabled: () => S.inF == null && S.outF == null, action: () => run('trimInOut') },
+      { label: 'Clear the selected range', key: 'clearSel', disabled: () => !Ranges.sel() && S.inF == null && S.outF == null, action: () => run('clearSel') },
+      { label: 'Clear all ranges', key: 'clearRanges', disabled: () => !S.ranges.length, action: () => run('clearRanges') },
       { label: 'Split at playhead', key: 'split', disabled: () => !has() || S.mode !== 'sequence', action: () => run('split') },
       { label: 'Add clip to end…', action: () => run('addFiles') },
       { label: 'Remove audio from clip', checked: () => cur() && cur().mute, disabled: noMedia, action: () => run('clipMute') },
@@ -226,11 +269,12 @@ const App = (() => {
       { label: 'Flop view (mirror)', key: 'flipX', checked: () => S.view.flipX, action: () => run('flipX') }, { label: 'Flip view (upside down)', key: 'flipY', checked: () => S.view.flipY, action: () => run('flipY') },
       { sep: true },
       { label: 'Sources panel', key: 'sources', checked: () => !$('#sources').hidden, action: () => run('sources') },
+      { label: 'Ranges panel', key: 'rangesPanel', checked: () => Ranges.isOpen(), action: () => run('rangesPanel') },
       { label: 'Info overlay', key: 'overlay', checked: () => Settings.get('showInfo'), action: () => run('overlay') },
       { label: 'Image info', key: 'info', checked: () => !$('#image-info').hidden, action: () => run('info') },
       { label: 'Timeline', key: 'timeline', checked: () => !$('#bottom').hidden, action: () => run('timeline') },
       { label: 'Full screen', key: 'fullscreen', action: () => run('fullscreen') },
-      { sep: true }, { label: 'Frame display', sub: displayItems }, { sep: true }, soon,
+      { sep: true }, { label: 'Frame display', sub: displayItems }, { sep: true }, { label: 'Full editor', key: 'editMode', disabled: noMedia, action: () => Editor.enter() },
     ]],
     ['Playback', () => [
       { label: S.playing ? 'Pause' : 'Play', key: 'playPause', disabled: noMedia, action: () => run('playPause') },
@@ -255,27 +299,58 @@ const App = (() => {
       { label: 'Previous mark', key: 'prevMark', disabled: noMedia, action: () => run('prevMark') },
       { label: 'Next mark', key: 'nextMark', disabled: noMedia, action: () => run('nextMark') },
       { sep: true },
-      { label: 'Set In', key: 'setIn', disabled: noMedia, action: () => run('setIn') },
-      { label: 'Set Out', key: 'setOut', disabled: noMedia, action: () => run('setOut') },
-      { label: 'Reset In / Out', key: 'clearInOut', disabled: () => S.inF == null && S.outF == null, action: () => run('clearInOut') },
+      { header: 'Ranges' },
+      { label: 'Set In (next range)', key: 'setIn', disabled: noMedia, action: () => run('setIn') },
+      { label: 'Set Out (make the range)', key: 'setOut', disabled: noMedia, action: () => run('setOut') },
+      { label: 'Deselect range', key: 'clearInOut', disabled: () => S.inF == null && S.outF == null, action: () => run('clearInOut') },
+      { label: 'Previous range', key: 'prevRangeN', disabled: () => !S.ranges.length, action: () => run('prevRangeN') },
+      { label: 'Next range', key: 'nextRangeN', disabled: () => !S.ranges.length, action: () => run('nextRangeN') },
+      { label: 'Rename selected range…', disabled: () => !Ranges.sel(), action: () => Ranges.startRename(Ranges.sel()) },
+      { label: 'Clear the selected range', key: 'clearSel', disabled: () => !Ranges.sel() && S.inF == null && S.outF == null, action: () => run('clearSel') },
+      { label: 'Clear all ranges', key: 'clearRanges', disabled: () => !S.ranges.length, action: () => run('clearRanges') },
+      { label: 'Ranges panel', key: 'rangesPanel', checked: () => Ranges.isOpen(), action: () => run('rangesPanel') },
+      { label: 'Save cut list', disabled: () => !S.ranges.length, sub: () => [
+        { label: 'CSV (Excel)…', action: () => Ranges.exportList('csv') }, { label: 'Text…', action: () => Ranges.exportList('txt') },
+        { label: 'EDL (Resolve / Premiere)…', action: () => Ranges.exportList('edl') }, { label: 'XML (Premiere / Resolve)…', action: () => Ranges.exportList('xml') },
+        { label: 'Contact sheet (PNG)…', disabled: !API, action: () => Ranges.exportList('sheet') }] },
+      { sep: true },
+      { header: 'Cuts' },
+      { label: 'Detect cuts…', key: 'detectCuts', disabled: noMedia, action: () => run('detectCuts') },
       { label: 'In / Out to previous marked shot', key: 'prevRange', disabled: noMedia, action: () => run('prevRange') },
       { label: 'In / Out to next marked shot', key: 'nextRange', disabled: noMedia, action: () => run('nextRange') },
       { sep: true },
+      { label: 'Delete the mark at the playhead', kb: 'Del', disabled: () => !S.marks.has(S.frame), action: () => Ranges.deleteMark(S.frame) },
       { label: 'Clear all marks', disabled: () => !S.marks.size, action: () => { Player.commit(); S.marks = new Set(); dirty = true; } },
+      { label: 'Add cut at the playhead', action: () => Ranges.addCut(S.frame) },
+      { label: 'Remove the cut at the playhead', disabled: () => !Ranges.cutAt(S.frame), action: () => Ranges.removeCut(S.frame) },
+      { sep: true },
+      { header: 'Track' },
+      { label: 'Tracker…', key: 'tracker', checked: () => Tracker.isOpen(), disabled: noMedia, action: () => run('tracker') },
+      { label: 'Export arcs…', disabled: noMedia, action: () => Tracker.exportDialog() },
     ]],
     ['Window', () => [
+      { label: S.winMax ? 'Restore' : 'Maximise', disabled: !API, action: () => winCmd(S.winMax ? 'restore' : 'maximize') },
+      { label: 'Minimise', disabled: !API, action: () => winCmd('minimize') },
+      { label: 'Snap to left half', kb: 'Win+←', disabled: !API, action: () => winCmd('snap-left') },
+      { label: 'Snap to right half', kb: 'Win+→', disabled: !API, action: () => winCmd('snap-right') },
+      { label: 'Centre on screen', disabled: !API, action: () => winCmd('center') },
+      { label: 'Move to next monitor', kb: 'Win+Shift+→', disabled: !API, action: () => winCmd('next-monitor') },
       { label: 'Always on top', checked: () => !!S.onTop, disabled: !API, action: () => { S.onTop = !S.onTop; API.setOnTop(S.onTop); } },
-      { label: 'Minimise', disabled: !API, action: () => API.windowCmd('minimize') },
       { sep: true },
+      { label: 'Ranges panel', key: 'rangesPanel', checked: () => Ranges.isOpen(), action: () => run('rangesPanel') },
       { label: 'Sources panel', key: 'sources', checked: () => !$('#sources').hidden, action: () => run('sources') },
       { label: 'Image info', key: 'info', checked: () => !$('#image-info').hidden, action: () => run('info') },
     ]],
     ['Help', () => [
       { label: 'Make Clips Pro your default player…', action: () => Dialogs.settingsDialog('default') },
       { label: 'Keyboard shortcuts…', action: () => Dialogs.shortcutsSheet() },
+      { sep: true },
+      { label: 'Check for updates…', disabled: !API, action: () => Dialogs.checkUpdates() },
+      { label: 'Install update from file…', disabled: !API, action: () => Dialogs.installFromFile() },
       { sep: true }, { label: 'About Clips Pro', action: () => Dialogs.about() },
     ]],
-  ]);
+  ]); }
+  setCompactMenus();
 
   function viewerMenu(x, y) {
     const items = has() ? [
@@ -283,6 +358,9 @@ const App = (() => {
       { label: 'Split at playhead', key: 'split', disabled: () => S.mode !== 'sequence', action: () => run('split') },
       { label: 'Set In point here', key: 'setIn', action: () => run('setIn') },
       { label: 'Set Out point here', key: 'setOut', action: () => run('setOut') },
+      { label: 'Clear the selected range', key: 'clearSel', disabled: () => !Ranges.sel() && S.inF == null && S.outF == null, action: () => run('clearSel') },
+      { label: 'Clear all ranges', key: 'clearRanges', disabled: () => !S.ranges.length, action: () => run('clearRanges') },
+      { label: 'Detect cuts…', key: 'detectCuts', action: () => run('detectCuts') },
       { sep: true },
       { label: S.marks.has(S.frame) ? 'Remove mark' : 'Add mark', key: 'mark', action: () => run('mark') },
       { label: 'Save this frame as image…', key: 'saveFrame', action: () => run('saveFrame') },
@@ -294,7 +372,7 @@ const App = (() => {
       S.mode === 'stack' ? { label: 'Stack options', sub: stackItems } : null,
       { sep: true },
       { label: 'Compare with…', action: async () => { if (!API) return; const f = await API.openDialog({ multi: true, title: 'Compare with' }); if (f.length) { Player.addFiles(f, { add: true }); Player.setMode('layout'); } } },
-      soon,
+      { label: 'Open in full editor', key: 'editMode', action: () => Editor.enter() },
       { label: 'Export…', key: 'export', action: () => run('export') },
       { sep: true },
       { label: 'Show in folder', disabled: !API, action: () => API.showInFolder(cur().media.path) },
@@ -305,18 +383,44 @@ const App = (() => {
     ];
     Menu.open(items, x, y);
   }
-  Timeline.onMenu = (f, x, y) => {
+  Timeline.onMenu = (f, x, y, cut) => {
     const L = Player.locate(f);
+    if (cut) {
+      const c = Ranges.cutAt(cut.f);
+      Menu.open([
+        { header: c ? `Cut at frame ${Player.frameText(cut.f)} · between range ${Ranges.label(c.r1)} and ${Ranges.label(c.r2)}` : `Mark at frame ${Player.frameText(cut.mark)}` },
+        { label: 'Delete mark (keep the ranges)', disabled: cut.mark == null, action: () => Ranges.deleteMark(cut.mark) },
+        { label: c ? `Remove this cut (join ${Ranges.label(c.r1)} and ${Ranges.label(c.r2)})` : 'Remove this cut', disabled: !c, action: () => Ranges.removeCut(cut.f) },
+        { sep: true },
+        { label: 'Go to this cut', action: () => Player.goto(cut.f) },
+        { label: 'Clear all marks', disabled: () => !S.marks.size, action: () => { Player.commit(); S.marks = new Set(); dirty = true; } },
+      ], x, y);
+      return;
+    }
     Menu.open([
       { header: `Frame ${Player.frameText(f)} · ${L.clip.media.name}` },
+      ...(() => {
+        const r = S.ranges.filter((q) => f >= q.a && f <= q.b).sort((p, q) => (p.b - p.a) - (q.b - q.a))[0];
+        return r ? [
+          { header: `Range ${Ranges.label(r)} · ${Player.frameText(r.a)} – ${Player.frameText(r.b)}` },
+          { label: S.selRange === r.id ? 'Deselect this range' : 'Select this range (loop it)', action: () => (S.selRange === r.id ? Ranges.deselect() : Ranges.select(r.id)) },
+          { label: 'Rename…', action: () => Ranges.startRename(r) },
+          { label: 'Go to its In', action: () => Player.goto(r.a) }, { label: 'Go to its Out', action: () => Player.goto(r.b) },
+          { label: 'Include in export', checked: () => r.on !== false, action: () => { r.on = r.on === false; dirty = true; } },
+          { label: 'Clear this range', kb: 'Del', action: () => Ranges.remove(r.id) },
+          { label: 'Add cut here (split the range)', disabled: f <= r.a, action: () => Ranges.addCut(f) },
+          { sep: true }] : [{ label: 'Add cut here', action: () => Ranges.addCut(f) }];
+      })(),
       { label: 'Set In here', key: 'setIn', action: () => Player.setIn(f) },
       { label: 'Set Out here', key: 'setOut', action: () => Player.setOut(f) },
-      { label: 'Reset In / Out', key: 'clearInOut', disabled: () => S.inF == null && S.outF == null, action: () => run('clearInOut') },
+      { label: 'Deselect range', key: 'clearInOut', disabled: () => S.inF == null && S.outF == null, action: () => run('clearInOut') },
+      { label: 'Clear all ranges', key: 'clearRanges', disabled: () => !S.ranges.length, action: () => run('clearRanges') },
+      { label: 'Ranges panel', key: 'rangesPanel', checked: () => Ranges.isOpen(), action: () => run('rangesPanel') },
       { sep: true },
       { label: S.marks.has(f) ? 'Remove mark here' : 'Add mark here', key: 'mark', action: () => Player.toggleMark(f) },
       { label: 'Previous mark', key: 'prevMark', action: () => run('prevMark') },
       { label: 'Next mark', key: 'nextMark', action: () => run('nextMark') },
-      { label: 'Loop this marked shot', key: 'nextRange', action: () => { const r = Player.ranges().find(([a, b]) => f >= a && f <= b); if (r) { S.inF = r[0]; S.outF = r[1]; S.loopMode = 'loop'; Player.goto(r[0]); Player.play(1); } } },
+      { label: 'Loop this marked shot', key: 'nextRange', action: () => { const r = Player.ranges().find(([a, b]) => f >= a && f <= b); if (r) { S.selRange = null; S.inF = r[0]; S.outF = r[1]; S.loopMode = 'loop'; Player.goto(r[0]); Player.play(1); } } },
       { sep: true },
       { label: 'Frame display', sub: displayItems },
       { label: 'Step wraps at In / Out', checked: () => Settings.get('stepWraps'), action: () => Settings.set('stepWraps', !Settings.get('stepWraps')) },
@@ -387,7 +491,7 @@ const App = (() => {
   // ---------- transport & controls ----------
   $('#btn-start').innerHTML = ICONS.start; $('#btn-end').innerHTML = ICONS.end;
   $('#btn-prev').innerHTML = ICONS.prev; $('#btn-next').innerHTML = ICONS.next;
-  $('#btn-rev').innerHTML = ICONS.rev;
+  setIcon($('#btn-rev'), ICONS.rev);
   const click = (id, fn) => $(id).addEventListener('click', fn);
   click('#btn-start', () => run('goStart')); click('#btn-end', () => run('goEnd'));
   click('#btn-prev', () => run('stepBack')); click('#btn-next', () => run('stepFwd'));
@@ -400,8 +504,10 @@ const App = (() => {
   click('#btn-open', () => run('open'));
   click('#btn-fit', () => run('fit'));
   click('#btn-sources', () => run('sources'));
+  click('#btn-ranges', () => run('rangesPanel'));
+  click('#btn-clear-sel', () => run('clearSel'));
   click('#btn-zoom-fit', () => Timeline.fit());
-  click('#btn-edit', () => toast('The full editor (Resolve-style) arrives in the next update'));
+  click('#btn-edit', () => { if (has()) Editor.enter(); else toast('Open a video first'); });
   click('#btn-display', (e) => { const r = e.currentTarget.getBoundingClientRect(); Menu.open(displayItems(), r.left, r.top - 170); });
   click('#btn-speed', (e) => { const r = e.currentTarget.getBoundingClientRect(); Menu.open(speedItems(), r.left, r.top - 200); });
   $('#volume').addEventListener('input', (e) => { S.volume = +e.target.value / 100; S.muted = false; Settings.set('volume', S.volume); Settings.set('muted', false); Player.setAudio(); dirty = true; });
@@ -423,14 +529,14 @@ const App = (() => {
     Player.zoomAbout(e.clientX - r.left, e.clientY - r.top, S.view.z * (e.deltaY < 0 ? 1.15 : 1 / 1.15));
   }, { passive: false });
   viewer.addEventListener('mousedown', (e) => {
-    if (e.button !== 0 || !has() || e.target.closest('#viewer-tools,#image-info,#convert-card,#wipe-line,.empty')) return;
+    if (e.button !== 0 || !has() || e.target.closest('#viewer-tools,#image-info,#convert-card,#wipe-line,.empty,#trk-panel,#trk-ov')) return;
     const sx = e.clientX, sy = e.clientY, px = S.view.px, py = S.view.py; let moved = false;
     const mv = (ev) => { const dx = ev.clientX - sx, dy = ev.clientY - sy; if (!moved && Math.hypot(dx, dy) < 4) return; moved = true; S.view.px = px + dx; S.view.py = py + dy; Player.applyView(); };
     const up = () => { removeEventListener('mousemove', mv); removeEventListener('mouseup', up); };
     addEventListener('mousemove', mv); addEventListener('mouseup', up);
   });
   viewer.addEventListener('dblclick', (e) => { if (!e.target.closest('#viewer-tools,#image-info,#convert-card,.empty')) toggleFullscreen(); });
-  viewer.addEventListener('contextmenu', (e) => { e.preventDefault(); viewerMenu(e.clientX, e.clientY); });
+  viewer.addEventListener('contextmenu', (e) => { e.preventDefault(); if (e.target.closest('#trk-panel')) return; viewerMenu(e.clientX, e.clientY); });
   $('#wipe-line').addEventListener('mousedown', (e) => {
     e.preventDefault(); e.stopPropagation();
     const r = viewer.getBoundingClientRect();
@@ -443,6 +549,7 @@ const App = (() => {
   // ---------- keyboard ----------
   const REPEATABLE = new Set(['stepBack', 'stepFwd', 'zoomIn', 'zoomOut', 'volUp', 'volDown']);
   addEventListener('keydown', (e) => {
+    if (Editor.isOpen() && !Modal.isOpen() && !Menu.isOpen()) { if (Editor.key(e)) return; }
     if (Modal.isOpen()) {
       const t = Modal.top();
       if (t.capture && t.capture(e)) { e.preventDefault(); return; }
@@ -455,7 +562,7 @@ const App = (() => {
     const k = Keys.fromEvent(e); if (!k) return;
     const act = Keys.actionFor(k);
     if (Dialogs.Trim.isOpen()) { if (Dialogs.Trim.key(e, act)) { e.preventDefault(); return; } }
-    if (e.key === 'Escape') { if (document.body.classList.contains('fs')) toggleFullscreen(); return; }
+    if (e.key === 'Escape') { if (Tracker.isOpen()) Tracker.close(); else if (S.selRange || S.inF != null || S.outF != null) { Player.clearInOut(); toast('Deselected'); } else if (document.body.classList.contains('fs')) toggleFullscreen(); return; }
     if (!act) return;
     e.preventDefault();
     if (e.repeat && !REPEATABLE.has(act)) return;
@@ -470,19 +577,18 @@ const App = (() => {
     $('#empty').hidden = has();
     // play button
     const pb = $('#btn-play'); const playingFwd = S.playing && S.dir > 0;
-    pb.innerHTML = playingFwd ? ICONS.pause : ICONS.play; pb.setAttribute('aria-label', playingFwd ? 'Pause' : 'Play');
+    setIcon(pb, playingFwd ? ICONS.pause : ICONS.play); pb.setAttribute('aria-label', playingFwd ? 'Pause' : 'Play');
     const rb = $('#btn-rev'); const playingRev = S.playing && S.dir < 0;
-    rb.innerHTML = playingRev ? ICONS.pause : ICONS.rev; rb.classList.toggle('on', playingRev);
-    const lb = $('#btn-loop'); lb.innerHTML = ICONS[S.loopMode]; lb.title = 'Loop mode: ' + LOOPS.find((l) => l[0] === S.loopMode)[1]; lb.classList.add('on');
+    setIcon(rb, playingRev ? ICONS.pause : ICONS.rev); rb.classList.toggle('on', playingRev);
+    const lb = $('#btn-loop'); setIcon(lb, ICONS[S.loopMode]); lb.title = 'Loop mode: ' + LOOPS.find((l) => l[0] === S.loopMode)[1]; lb.classList.add('on');
     $('#btn-allframes').classList.toggle('on', S.allFrames);
     $('#btn-scrub').classList.toggle('on', S.audioScrub);
-    $('#btn-vol').innerHTML = S.muted || S.volume === 0 ? ICONS.mute : ICONS.vol;
+    setIcon($('#btn-vol'), S.muted || S.volume === 0 ? ICONS.mute : ICONS.vol);
     $('#volume').value = String(Math.round((S.muted ? 0 : S.volume) * 100));
     $('#btn-display').textContent = ({ source: 'Frames', session: 'Session', timecode: 'Timecode', seconds: 'Seconds', footage: 'Feet' }[S.display] || 'Frames') + ' ▾';
     $('#btn-display').title = 'Frame display: ' + (DISPLAY.find((d) => d[0] === S.display) || DISPLAY[0])[1];
     $('#btn-speed').textContent = (S.speed === 1 ? '1' : S.speed) + '×';
     $$('#mode-seg button').forEach((b) => b.classList.toggle('on', b.dataset.mode === S.mode));
-    $('#btn-edit').classList.add('soon');
     // frame field
     if (document.activeElement !== $('#frame-field')) $('#frame-field').value = T ? Player.frameText(S.frame) : '';
     $('#frame-total').textContent = T ? '/ ' + (S.display === 'source' && c ? String(c.tout + 1) : Player.frameText(T - 1)) : '';
@@ -494,10 +600,16 @@ const App = (() => {
       const slowed = S.playing && S.allFrames && S.rateFactor < 0.999 ? ` · slowed to ${Math.round(S.rateFactor * 100)}% to keep every frame` : '';
       ro.innerHTML = '';
       const kind = S.display === 'source' ? 'session' : S.display;
-      ro.append(el('span', {}, 'In ' + Player.frameText(a, kind)), el('span', {}, 'Out ' + Player.frameText(b, kind)), el('span', {}, (b - a + 1) + ' frames'),
-        el('span', {}, `${fmtFps(Player.fps())} fps target · ${meas} measured${slowed}`));
+      const sr = Ranges.sel();
+      if (sr) ro.append(el('span', { class: 'ro-range' }, 'Range ' + Ranges.label(sr)));
+      else if (S.inF != null && S.outF == null) ro.append(el('span', { class: 'ro-range' }, 'Range ' + (S.ranges.length + 1) + ' …'));
+      ro.append(el('span', {}, 'In ' + Player.frameText(a, kind)), el('span', {}, 'Out ' + Player.frameText(b, kind)), el('span', {}, (b - a + 1) + ' frames'));
+      if (S.ranges.length) ro.append(el('span', { class: 'ro-opt' }, `${S.ranges.length} ${S.ranges.length === 1 ? 'range' : 'ranges'}`));
+      ro.append(el('span', { class: 'ro-opt' }, `${fmtFps(Player.fps())} fps target · ${meas} measured${slowed}`));
       if (!S.allFrames) ro.append(el('span', { class: 'drop' + (S.dropped ? ' bad' : '') }, `● ${S.dropped} dropped`));
     } else ro.textContent = '';
+    $('#btn-clear-sel').hidden = !(T && (S.selRange || S.inF != null || S.outF != null));
+    $('#btn-ranges').classList.toggle('on', Ranges.isOpen());
     // overlay
     const ov = $('#overlay-info');
     if (T && Settings.get('showInfo') && c) {
@@ -534,7 +646,8 @@ const App = (() => {
   let lastDraw = 0;
   function frame(now) {
     Player.tick(now);
-    if (dirty || S.playing || now - lastDraw > 250) { updateUI(); Timeline.draw(); dirty = false; lastDraw = now; }
+    if (typeof Editor !== 'undefined' && Editor.isOpen()) { Editor.tick(now); requestAnimationFrame(frame); return; }
+    if (dirty || S.playing || now - lastDraw > 250) { Ranges.sync(); updateUI(); Timeline.draw(); Tracker.draw(); Ranges.render(); dirty = false; lastDraw = now; }
     requestAnimationFrame(frame);
   }
 
@@ -558,6 +671,7 @@ const App = (() => {
       if (!installed) setTimeout(() => Dialogs.installTip(), 800);
     }
     if (API) {
+      API.ready().then((r) => { if (r && r.failedUpdate) toast(`The update to ${r.failedUpdate.version} didn't start, so Clips Pro went back to ${r.version}.`, 6000); }).catch(() => {});
       API.onOpenFiles((files) => incoming(files, 'openwith'));
       const files = await API.initialFiles();
       if (files.length) incoming(files, 'openwith');
@@ -565,5 +679,5 @@ const App = (() => {
     }
   }
   start();
-  return { sessionChanged, refreshAll, run, incoming, get dirty() { return dirty; }, set dirty(v) { dirty = v; } };
+  return { setCompactMenus, sessionChanged, refreshAll, run, incoming, get dirty() { return dirty; }, set dirty(v) { dirty = v; } };
 })();

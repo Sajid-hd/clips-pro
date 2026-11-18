@@ -1,5 +1,5 @@
 'use strict';
-const CACHE = 'clipspro-2abd4c6704';
+const CACHE = 'clipspro-36200b2d46';
 const FILES = [
   "./",
   "assets/icon-192.png",
@@ -7,15 +7,23 @@ const FILES = [
   "assets/icon-maskable-512.png",
   "index.html",
   "js/app.js",
+  "js/cuts.js",
   "js/dialogs.js",
+  "js/editor.js",
   "js/keys.js",
   "js/media.js",
   "js/menu.js",
+  "js/mp4-muxer.min.js",
   "js/player.js",
+  "js/ranges.js",
   "js/timeline.js",
+  "js/tracker.js",
   "js/util.js",
+  "js/webexport.js",
+  "js/webm-muxer.min.js",
   "manifest.webmanifest",
   "style.css",
+  "version.json",
 ];
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));

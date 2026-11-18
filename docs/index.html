@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; media-src 'self' file: blob:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; font-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; font-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
 <title>Clips Pro</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#111214">
@@ -46,6 +46,7 @@
       <div id="overlay-info" class="mono"></div>
       <div id="viewer-tools">
         <button id="btn-fit" class="chip">Fit</button>
+        <button id="btn-ranges" class="chip toggle" title="Ranges panel (R)">Ranges</button>
         <button id="btn-sources" class="chip">Sources ▸</button>
       </div>
       <div id="image-info" hidden></div>
@@ -70,6 +71,7 @@
         <button data-mode="sequence">Sequence</button><button data-mode="stack">Stack</button><button data-mode="layout">Layout</button><button data-mode="tile">Tile</button>
       </div>
       <div id="readouts" class="mono"></div>
+      <button id="btn-clear-sel" class="chip clear-sel" hidden title="Clear the selected range (Ctrl+Del) · Esc just deselects · Alt+X clears all">✕</button>
       <span class="muted">Zoom</span>
       <input type="range" id="zoom" min="0" max="1000" value="0" aria-label="Timeline zoom">
       <button id="btn-zoom-fit" class="chip">Fit</button>
@@ -97,7 +99,7 @@
         <button id="btn-speed" class="chip">1×</button>
         <button id="btn-allframes" class="chip toggle">All frames</button>
         <button id="btn-scrub" class="chip toggle">Audio scrub</button>
-        <button id="btn-edit" class="edit" title="The full editor arrives in the next update">Edit</button>
+        <button id="btn-edit" class="edit" title="Open the full editor (E)">Edit</button>
       </div>
     </div>
   </footer>
@@ -111,8 +113,15 @@
 <script src="js/menu.js"></script>
 <script src="js/media.js"></script>
 <script src="js/player.js"></script>
+<script src="js/cuts.js"></script>
+<script src="js/ranges.js"></script>
 <script src="js/timeline.js"></script>
+<script src="js/mp4-muxer.min.js"></script>
+<script src="js/webm-muxer.min.js"></script>
+<script src="js/webexport.js"></script>
 <script src="js/dialogs.js"></script>
+<script src="js/tracker.js"></script>
+<script src="js/editor.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>
